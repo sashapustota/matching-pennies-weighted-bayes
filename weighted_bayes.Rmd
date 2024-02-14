@@ -1,0 +1,221 @@
+---
+title: "Portfolio 1"
+output: html_document
+date: "2024-02-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Matching Pennies: Weighted Bayesian Strategy
+
+This code below is an implementation of a Weighted Bayesian strategy for the classic two-player game, Matching Pennies. Matching Pennies is a simple game where two players simultaneously reveal either heads or tails, and the outcome is determined by whether the choices match.
+
+The Weighted Bayesian strategy leverages Bayesian inference techniques to adaptively adjust the player's decision-making based on feedback from previous rounds. In comparison to "vanilla" Bayes, Weighted Bayes does not depend on the agent having perfect memory. The agent only uses the last 7 outcomes to infer the strategy of the other player. However, the prior of the agent is *weighted* with each trial, meaning the more times the agent plays the Matching Pennies game, the stronger his prior belief about the strategy of the opponent. You can say he builds ups *experience*.
+
+## Step 1: Load packages
+
+Load packages. Nothing fancy.
+
+```{r}
+
+set.seed(420)
+pacman::p_load(tidyverse, patchwork, truncnorm)
+
+```
+
+## Step 2: Create functions
+
+### Memory
+
+First, we create a function that represents the "working memory" of the agent, which is used for computing the likelihood of the strategy (probability of choosing penny '1'). Essentially, the function takes an input (the decision of the opponent) and adds it to the a memory vector. If the vector has 7 elements (meaning if the agent has played more than 7 rounds of the game), the value is added to the "top" of the vector, with the "oldest" value being deleted from the "memory".
+
+
+```{r}
+
+# Magic number 7
+max_length = 7
+add_to_vector <- function(value) {
+    # Append the new value to the vector
+    memory_vector <- c(memory_vector, value)
+    
+    # If the length of the vector exceeds the maximum length,
+    # remove the oldest value(s)
+    if (length(memory_vector) > max_length) {
+        memory_vector <- memory_vector[(length(memory_vector) - max_length + 1):length(memory_vector)]
+    }
+    
+    return(memory_vector)
+}
+
+```
+
+### Weighted Bayes
+
+Now onto the Weighted Bayes function. These are the steps executed in the function:
+
+The opponents choice from last trial is added to the agents memory, using the function described above.
+The likelihood of the rate (probability of choosing 1) of the opponent is estimated using the memory vector.
+The posterior is computed using the likelihood and the weighted prior.
+  If it is the first trial, the prior is a flat, uniform prior. Whereas after the first trial, the resulting posterior from the previous trial becomes the prior for the current trial.
+  Additionally, the prior is weighted by multiplying it by 1.02 at each trial - the "experience" component.
+The posterior is then sampled, and the mean and the standard deviation of the sampled distribution is used to sample the inferred rate from a truncated Gaussian distribution.
+Finally, the choice of the agent is drawn from a binomial distribution using the rate sampled above.
+
+The function outputs the choice for the current trial, the posterior that is used as a prior in the next trial, and the updated memory vector.
+
+```{r}
+
+AgentBayes_f <- function(prior, Feedback, memory_vector, p_grid){
+  
+  # Updating the memory vector
+  memory_vector = add_to_vector(Feedback)
+
+  # compute likelihood at each value in grid
+  likelihood = dbinom(sum(memory_vector), size = length(memory_vector), prob = p_grid)
+  
+  weighted_prior = prior * 1.02
+  
+  # compute product of likelihood and prior
+  unstd.posterior = likelihood * weighted_prior
+  
+  # standardize the posterior so it sums to 1
+  posterior = unstd.posterior / sum(unstd.posterior)
+  
+  # Sample the posterior
+  samples = sample(p_grid, prob = posterior, size = 1e4, replace = TRUE)
+  
+  # Get the mean and the standard deviation of the samples
+  mean_rate = mean(samples)
+  sd_rate = sd(samples)
+  
+  # Truncate the normal distribution to ensure sampled rates are within [0, 1]
+  lower_bound <- 0
+  upper_bound <- 1
+  
+  # Sample from the truncated normal distribution
+  rate <- rtruncnorm(1, a = lower_bound, b = upper_bound, mean = mean_rate, sd = sd_rate)
+  
+  choice = rbinom(1, 1, rate)
+  return(list(choice, posterior, memory_vector))
+}
+
+# Probability grid is defined outside of the function
+p_grid = seq(from = 0, to = 1, length.out=20)
+
+# Starting values for the Weighted Bayes - for the first trial
+memory_vector = c(1)
+first_prior = rep(1, 20)
+first_feedback = 0
+
+```
+
+### Opponents function
+
+Additionally, we create a function for our opponent. It simply samples from a binomial distribution with a specific probability defined by the set **rate**.
+
+```{r}
+
+RandomAgent_f <- function(input, rate){
+  n <- length(input)
+  choice <- rbinom(n, 1, rate)
+  return(choice)
+}
+
+```
+
+## Step 3: Run the simulation
+
+Finally, we run the simulation for 11 different rates for 100 agents and 120 trials for each agent, saving the results to a dataframe.
+
+```{r}
+# Define the number of agents and trials
+num_agents <- 100
+trials <- 120
+
+# Initialize a data frame to store the results
+df <- NULL
+
+# Loop over different rates
+for (rate in seq(from = 0.5, to = 1, by = 0.05)) {
+  
+  # Loop over each agent
+  for (agent in 1:num_agents) {
+    Self <- rep(NA, trials)
+    Other <- rep(NA, trials)
+    
+    # Initialize the first move of the agent
+    Self[1] <- RandomAgent_f(1, 0.5)
+    Other <- RandomAgent_f(seq(trials), rate)
+    
+    # Loop over each trial
+    for (i in 2:trials) {
+      Feedback <- Other[i - 1]
+      
+      # If it's the first step in the loop, we pass starting inputs to our Weighted Bayes - a flat prior, and a sample input that will make his starting belief about the outcome to be 50/50.
+      if (i == 2) {
+        results <- AgentBayes_f(first_prior, first_feedback, memory_vector, p_grid)  # Use initial values
+      } else {
+        results <- AgentBayes_f(posterior, Feedback, memory_vector, p_grid)  # Use posterior from previous iteration
+      }
+      
+      # Store the result of the agent's move
+      Self[i] <- results[[1]]
+      
+      # Update the posterior and memory_vector for the next iteration
+      posterior <- results[[2]]
+      memory_vector <- results[[3]]
+    }
+    
+    # Create a tibble to store the results of this agent
+    temp <- tibble(
+      Self,
+      Other = Other,  # Assuming Other is generated based on the current rate
+      trial = seq(trials),
+      Feedback = as.numeric(Self == Other),  # Assuming you want to compare the moves of Self and Other
+      agent,
+      rate
+    )
+    
+    # Append the results of this agent to the main data frame
+    if (is.null(df)) {
+      df <- temp
+    } else {
+      df <- bind_rows(df, temp)
+    }
+  }
+}
+
+```
+
+## Step 4: Plot the results
+
+```{r}
+
+# Calculate cumulative rate for self and other for each agent and rate
+df <- df %>%
+  group_by(rate, agent) %>%
+  mutate(cumulativerateSelf = cumsum(Feedback) / seq_along(Feedback),
+         cumulativerateOther = cumsum(1 - Feedback) / seq_along(Feedback))
+
+# Calculate mean cumulative rate for each rate
+summary_df <- df %>%
+  group_by(rate, trial) %>%
+  summarize(mean_cumulativerateSelf = mean(cumulativerateSelf),
+            mean_cumulativerateOther = mean(cumulativerateOther))
+
+# Plot mean cumulative rates, facet wrapped by rate
+p1 = ggplot(summary_df, aes(trial)) + 
+  geom_line(aes(y = mean_cumulativerateSelf, color = "Self")) +
+  geom_line(aes(y = mean_cumulativerateOther, color = "Other")) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  ylim(0, 1) +
+  facet_wrap(~rate) +
+  theme_classic() +
+  labs(color = "Agent")
+
+p1
+
+```
+
